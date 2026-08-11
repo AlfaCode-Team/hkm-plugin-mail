@@ -1,7 +1,7 @@
 {
     "name": "mail",
     "version": "1.0.1",
-    "kernel": "^1.0",
+    "kernel": "^1.2",
     "solves": "mail.delivery",
     "type": "module",
 
@@ -11,12 +11,13 @@
         "Plugins\\Mail\\API\\Contracts\\MailerContract"
     ],
 
+    "routePrefix": "/mail/demo",
     "routes": [
-        { "method": "GET", "path": "/mail/demo",         "handler": "Plugins\\Mail\\Infrastructure\\Http\\MailDemoController@index"   },
-        { "method": "GET", "path": "/mail/demo/preview", "handler": "Plugins\\Mail\\Infrastructure\\Http\\MailDemoController@preview" },
-        { "method": "GET", "path": "/mail/demo/send",    "handler": "Plugins\\Mail\\Infrastructure\\Http\\MailDemoController@send"    },
-        { "method": "GET", "path": "/mail/demo/queue",   "handler": "Plugins\\Mail\\Infrastructure\\Http\\MailDemoController@queue"   },
-        { "method": "GET", "path": "/mail/demo/view",    "handler": "Plugins\\Mail\\Infrastructure\\Http\\MailDemoController@view"    }
+        { "method": "GET", "path": "",         "handler": "Plugins\\Mail\\Infrastructure\\Http\\MailDemoController@index" },
+        { "method": "GET", "path": "/preview", "handler": "Plugins\\Mail\\Infrastructure\\Http\\MailDemoController@preview" },
+        { "method": "GET", "path": "/send",    "handler": "Plugins\\Mail\\Infrastructure\\Http\\MailDemoController@send" },
+        { "method": "GET", "path": "/queue",   "handler": "Plugins\\Mail\\Infrastructure\\Http\\MailDemoController@queue" },
+        { "method": "GET", "path": "/view",    "handler": "Plugins\\Mail\\Infrastructure\\Http\\MailDemoController@view" }
     ],
     "emits": [],
     "listens": [],
