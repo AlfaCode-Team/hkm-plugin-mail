@@ -11,6 +11,8 @@ use AlfacodeTeam\PhpServicePlatform\Kernel\Pipelines\Cli\CliPipeline;
 use AlfacodeTeam\PhpServicePlatform\Kernel\Pipelines\Http\HttpPipeline;
 use AlfacodeTeam\PhpServicePlatform\Kernel\Pipelines\Worker\WorkerPipeline;
 use AlfacodeTeam\PhpServicePlatform\Kernel\Ports\MailPort;
+use AlfacodeTeam\PhpServicePlatform\Kernel\Ports\CachePort;
+use AlfacodeTeam\PhpServicePlatform\Kernel\Ports\LoggerPort;
 use AlfacodeTeam\PhpServicePlatform\Kernel\Ports\QueuePort;
 use Plugins\Mail\API\Contracts\MailerContract;
 use Plugins\Mail\Application\Jobs\SendMailJob;
@@ -70,6 +72,12 @@ final class Provider implements ModuleContract
                 fromName:  (string) ($config['from']['name'] ?? ''),
                 charset:   (string) ($config['charset'] ?? 'UTF-8'),
                 queueName: (string) ($config['queue'] ?? 'mail'),
+                // Bounds inline delivery of urgent mail; absent is fine, it just
+                // means urgent mail queues like everything else.
+                cache:           $c->has(CachePort::class) ? $c->make(CachePort::class) : null,
+                urgentViews:     array_values((array) ($config['urgent']['views'] ?? [])),
+                urgentMaxInline: (int) ($config['urgent']['max_inline'] ?? 0),
+                urgentLockTtl:   (int) ($config['urgent']['lock_ttl'] ?? 20),
             );
         });
 
@@ -77,9 +85,15 @@ final class Provider implements ModuleContract
         $container->bind(MailPort::class, static fn(ModuleContainer $c): Mailer => $c->make(Mailer::class));
         $container->bind(MailerContract::class, static fn(ModuleContainer $c): Mailer => $c->make(Mailer::class));
 
-        // Background delivery job resolves the same Transport.
+        // Background delivery job resolves the same Transport. The logger is
+        // optional and resolved the same way the Mailer's are -- a dead-lettered
+        // mail is the one event in this plugin nothing else reports, so it has
+        // to reach the application log when a LoggerPort is available.
         $container->bindInternal(SendMailJob::class, static fn(ModuleContainer $c): SendMailJob =>
-            new SendMailJob($c->make(Transport::class)));
+            new SendMailJob(
+                transport: $c->make(Transport::class),
+                logger:    $c->has(LoggerPort::class) ? $c->make(LoggerPort::class) : null,
+            ));
     }
 
     public function boot(HttpPipeline $http, CliPipeline $cli, WorkerPipeline $worker, EventBus $events): void

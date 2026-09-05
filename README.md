@@ -63,7 +63,10 @@ Override per project by copying it to `config_path('mail.php')`.
 | `MAIL_FROM_ADDRESS` | `''` | default `From:` — a message with no `from()` and no default **throws** |
 | `MAIL_FROM_NAME` | `''` | display name for the default sender |
 | `MAIL_CHARSET` | `UTF-8` | body + header charset |
-| `MAIL_QUEUE` | `mail` | queue name used by `enqueue()`/`queue()` |
+| `MAIL_QUEUE` | `mail` | queue name used by `enqueue()`/`queue()` — **run a worker on this queue**, `WORKER_QUEUE=mail` |
+| `MAIL_URGENT_VIEWS` | `user::emails/verify` | comma-separated views sent **inline** instead of queued; trailing `*` = prefix |
+| `MAIL_URGENT_MAX_INLINE` | `3` | concurrent inline sends before urgent mail queues instead; `0` disables inline delivery |
+| `MAIL_URGENT_LOCK_TTL` | `20` | seconds an inline slot is held if a process dies mid-send |
 | `MAIL_SMTP_HOSTS` | `MAIL_HOST` | **comma-separated** host list — failover, tried in order |
 | `MAIL_HOST` | `localhost` | single host (fallback when `MAIL_SMTP_HOSTS` is unset) |
 | `MAIL_PORT` | `587` | SMTP port |
@@ -201,6 +204,41 @@ payload returns `JobResult::skipped()` rather than failing the worker.
 
 > With **no** `QueuePort` bound, `enqueue()` silently sends inline and returns
 > `''`. Check for `''` if the job id matters to you.
+
+### Urgent mail — sent now, not queued
+
+A verification or password-reset link is worthless later: the person is on the
+"check your inbox" screen right now, and queueing makes delivery depend on a
+worker being up. When it is not, the mail is never sent and nothing says so.
+
+So mail rendered from a view in `MAIL_URGENT_VIEWS` is **delivered inline** by
+`queue()` — callers keep using the kernel `MailPort` and need to know nothing
+about it, which matters because the code that sends verification mail holds a
+`MailPort`, and the port has no way to express priority.
+
+Matching is on the **view name, never the subject**: subjects are translated
+("Verify your email address" / "Vérifiez votre adresse e-mail"), so matching them
+would silently stop working on a non-English edition.
+
+Inline delivery is capped at `MAIL_URGENT_MAX_INLINE` concurrent sends, held as
+named locks through the `CachePort` so the limit spans every PHP-FPM worker
+rather than each one counting to it alone. Past the cap the message queues — a
+burst of signups must not leave every web worker blocked on one SMTP socket.
+
+| Situation | Result |
+|---|---|
+| urgent view, capacity free | sent inline, `queue()` returns `''` |
+| urgent view, all slots busy | queued, returns the job id |
+| urgent view, transport throws | **queued** (not lost, not rethrown) |
+| no `CachePort` bound | queued — the cap cannot be enforced |
+| any other view | queued, as before |
+
+> The `CachePort` must be **cross-process** (`FileCache`, Redis) for the cap to
+> mean anything. A per-process cache gives each PHP-FPM worker its own slots, so
+> the effective limit is multiplied by the worker count.
+
+`dispatchNow(Message $message): string` exposes the same decision directly for
+callers holding the concrete `Mailer`.
 
 ### 5. Previewing — no send
 

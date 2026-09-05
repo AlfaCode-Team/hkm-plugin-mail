@@ -18,6 +18,46 @@ return [
     'charset' => env('MAIL_CHARSET', 'UTF-8'),
     'queue'   => env('MAIL_QUEUE', 'mail'),
 
+    /**
+     * URGENT MAIL — delivered inline instead of queued.
+     *
+     * A verification or password-reset link is worthless later: the person is
+     * sitting on the "check your inbox" screen right now, and queueing it makes
+     * delivery depend on a worker being up. That is a much worse failure than a
+     * second of latency on the request, because when the worker is NOT running
+     * the mail is never sent at all and nothing says so.
+     *
+     * So mail rendered from one of these VIEWS is sent inline -- unless the
+     * `max_inline` concurrency slots are already taken, in which case it falls
+     * back to the queue rather than piling web workers up on the SMTP socket.
+     *
+     * Matched on the VIEW name, never the subject: the subject is translated
+     * ("Verify your email address" / "Vérifiez votre adresse e-mail"), so
+     * matching it would silently stop working on a French edition. The view
+     * name is a stable identifier. A trailing '*' matches a prefix, so
+     * 'auth::emails/*' covers a whole plugin's transactional mail.
+     *
+     * The default lists ONLY 'user::emails/verify', because that is the only
+     * view that exists today. Naming views that ship later would look like
+     * working configuration while matching nothing.
+     */
+    'urgent' => [
+        'views' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env('MAIL_URGENT_VIEWS', 'user::emails/verify')),
+        ))),
+
+        // Concurrent inline sends allowed before urgent mail queues instead.
+        // 0 disables inline delivery entirely (everything queues, the old
+        // behaviour). Requires a CROSS-PROCESS CachePort to be meaningful --
+        // with a per-process cache each PHP-FPM worker sees its own slots.
+        'max_inline' => (int) env('MAIL_URGENT_MAX_INLINE', 3),
+
+        // Seconds a slot is held if a process dies mid-send. Keep it just above
+        // the SMTP timeout so a crash cannot wedge inline delivery for long.
+        'lock_ttl' => (int) env('MAIL_URGENT_LOCK_TTL', 20),
+    ],
+
     'smtp' => [
         // Comma-separated for failover, e.g. "smtp1.example.com,smtp2.example.com".
         'hosts'       => env('MAIL_SMTP_HOSTS', env('MAIL_HOST', 'localhost')),
