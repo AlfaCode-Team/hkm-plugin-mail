@@ -18,7 +18,7 @@ native distribution ships without `vendor/`.
 |---|---|
 | `solves` | `mail.delivery` |
 | `requires` | **none** — `[]` |
-| `exposes` | `MailPort` (kernel port), `MailerContract` |
+| `exposes` | `MailPort` (kernel port), `MailerContract`, `MailerFactoryContract` |
 | `jobs` | `mail.send` → `SendMailJob`, queue `mail` |
 | Routes | 5 demo `GET` routes (see Part IV — remove for production) |
 | Activation | **on-demand** |
@@ -106,13 +106,18 @@ Read them with `env()` — **never `getenv()`**.
 |---|---|---|
 | **`MailPort`** (kernel) | `send($to, $subject, $view, $data)` · `queue(...)` | any module — the portable, view-based shortcut |
 | **`MailerContract`** (this plugin) | `message()` → fluent `Message` → `dispatch()` / `enqueue()` / `preview()` | you need cc/bcc, attachments, inline images, headers, priority |
+| **`MailerFactoryContract`** (this plugin) | `forSmtp(SmtpSettings $settings): MailerContract` | you need to send through SMTP settings THIS plugin's config does not know about — a tenant's own server |
 
-Both are the same underlying `Mailer` instance, so they share transport, DKIM
-signer and defaults.
+`MailPort` and `MailerContract` are the same underlying `Mailer` instance
+(the env-driven one), so they share transport, DKIM signer and defaults.
+`MailerFactoryContract` builds an INDEPENDENT `Mailer` per call — see
+[§9](#9-per-tenant-smtp--mailerfactorycontract).
 
 ```php
 use AlfacodeTeam\PhpServicePlatform\Kernel\Ports\MailPort;
 use Plugins\Mail\API\Contracts\MailerContract;
+use Plugins\Mail\API\Contracts\MailerFactoryContract;
+use Plugins\Mail\API\DTOs\SmtpSettings;
 ```
 
 Cross-plugin callers should type against `MailPort` (kernel port, no coupling) and
@@ -293,6 +298,67 @@ request or job reuse a single connection (`RSET` between messages). The queue
 worker builds a fresh module scope per job, so reuse is *within* a job — batch a
 run of messages into one job to benefit.
 
+### 9. Per-tenant SMTP — MailerFactoryContract
+
+`MailPort`/`MailerContract` always send through THIS plugin's own `mail.smtp`
+config (`MAIL_HOST`, `MAIL_USERNAME`, …). A project that must send through a
+**tenant's own SMTP server** — host/login stored per tenant, not in `.env` —
+builds a separate mailer for it with `MailerFactoryContract`, without ever
+importing this plugin's internal `Transport`/`SmtpTransport`/`MimeBuilder`
+(they stay `bindInternal`; reaching into them from a project would violate GDA).
+
+```php
+use Plugins\Mail\API\Contracts\MailerFactoryContract;
+use Plugins\Mail\API\DTOs\SmtpSettings;
+
+final class TenantMailer
+{
+    public function __construct(private readonly MailerFactoryContract $factory) {}
+
+    public function send(Tenant $tenant): void
+    {
+        $mailer = $this->factory->forSmtp(new SmtpSettings(
+            hosts:      [$tenant->smtpHost],
+            port:       $tenant->smtpPort,
+            encryption: $tenant->smtpEncryption,   // 'tls' | 'ssl' | 'none'
+            username:   $tenant->smtpUsername,
+            password:   $tenant->smtpPassword,
+            fromEmail:  $tenant->fromEmail,          // '' = the configured MAIL_FROM_ADDRESS
+            fromName:   $tenant->fromName,
+        ));
+
+        $mailer->dispatch(
+            $mailer->message()->to('customer@example.com')->subject('Your receipt')->html('<p>Thanks!</p>'),
+        );
+    }
+}
+```
+
+`SmtpSettings` validates at construction (`Plugins\Mail\Domain\MailException` on
+failure): at least one non-empty host, `port` in `1..65535`, `encryption` one of
+`tls`/`ssl`/`none`. `$password` is never included in an exception message,
+`__toString()`, `print_r()`/`var_dump()` output, or an uncaught exception's
+stack trace (`#[\SensitiveParameter]`) — the one thing it does NOT guard is
+`var_export()`, which has no redaction hook; do not `var_export()` it.
+
+Every OTHER SMTP tunable a tenant does not own — `auth_mode`, `oauth_token`,
+`helo_domain`, `timeout`, `verify_peer`, `keep_alive`, `allow_insecure_auth` —
+plus `charset` and DKIM signing still come from this plugin's configured
+`mail.*`, exactly as the env-driven mailer uses them, so the two paths cannot
+drift (`Infrastructure\Transport\TransportFactory` is the one place that logic
+lives).
+
+**Delivery is always inline.** The mailer `forSmtp()` returns has no
+`QueuePort`: `dispatch()` sends now, and `enqueue()`/`queue()` also deliver
+inline and return `''` rather than being handed to a queue worker with no idea
+which tenant's credentials to use. There is no urgent-mail inline-slot cap on
+this mailer either — that cap exists to bound *queued* concurrency, which does
+not apply when nothing is ever queued.
+
+```php
+$jobId = $mailer->enqueue($message);   // always '' — sent immediately, never queued
+```
+
 ---
 
 ## Part IV — Reference
@@ -367,19 +433,24 @@ curl "http://localhost:8000/mail/demo/send?to=you@example.com"
 Everything the plugin throws is `Plugins\Mail\Domain\MailException`
 (`\RuntimeException`): no `From` address, an address failing the CR/LF guard, an
 unreadable attachment, an SMTP handshake/AUTH failure, a DKIM key that will not
-load. Callers that treat mail as non-critical (the Auth password flows, for
-instance) catch `\Throwable` and carry on.
+load, or an invalid `SmtpSettings` (empty host list, out-of-range port, unknown
+encryption). Callers that treat mail as non-critical (the Auth password flows,
+for instance) catch `\Throwable` and carry on.
 
 ### Layout
 
 ```
 API/Contracts/MailerContract            message() · dispatch() · enqueue() · preview()
+API/Contracts/MailerFactoryContract     forSmtp(SmtpSettings): MailerContract — caller-supplied SMTP
+API/DTOs/SmtpSettings                   validated hosts/port/encryption/credentials/From; password never leaks
 Application/Mailer                      MailPort + MailerContract; compile → DKIM → transport/queue
+Application/MailerFactory               builds a Mailer for SmtpSettings — no QueuePort, always inline
 Application/Jobs/SendMailJob            background delivery (job name "mail.send")
 Domain/                                 Message (builder) · Address (CRLF guard) · Attachment · Priority · MailException
 Infrastructure/Mime/MimeBuilder         multipart mixed/related/alternative + QP/base64 encoders
 Infrastructure/Security/DkimSigner      RSA-SHA256 relaxed/relaxed
 Infrastructure/Transport/               Transport + Smtp/Sendmail/Mail/Array/Log
+Infrastructure/Transport/TransportFactory  Transport + DKIM from config — shared by Provider and MailerFactory
 Infrastructure/Http/MailDemoController  demo routes (GET /mail/demo/*) — remove for prod
 config/mail.php                         all MAIL_* configuration
 ```
