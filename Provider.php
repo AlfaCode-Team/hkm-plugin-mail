@@ -12,10 +12,12 @@ use AlfacodeTeam\PhpServicePlatform\Kernel\Pipelines\Http\HttpPipeline;
 use AlfacodeTeam\PhpServicePlatform\Kernel\Pipelines\Worker\WorkerPipeline;
 use AlfacodeTeam\PhpServicePlatform\Kernel\Ports\MailPort;
 use AlfacodeTeam\PhpServicePlatform\Kernel\Ports\CachePort;
+use AlfacodeTeam\PhpServicePlatform\Kernel\Ports\HttpClientPort;
 use AlfacodeTeam\PhpServicePlatform\Kernel\Ports\LoggerPort;
 use AlfacodeTeam\PhpServicePlatform\Kernel\Ports\QueuePort;
 use Plugins\Mail\API\Contracts\MailerContract;
 use Plugins\Mail\API\Contracts\MailerFactoryContract;
+use Plugins\Mail\API\Contracts\MailtrapApiContract;
 use Plugins\Mail\Application\Jobs\SendMailJob;
 use Plugins\Mail\Application\Mailer;
 use Plugins\Mail\Application\MailerFactory;
@@ -30,6 +32,12 @@ use Plugins\View\API\Contracts\ViewRendererContract;
  * Binds the Transport (from config), the MimeBuilder, an optional DkimSigner and
  * the Mailer — which satisfies BOTH the kernel `MailPort` (so any module's
  * view-based `send()`/`queue()` just works) and the richer `MailerContract`.
+ *
+ * `MAIL_TRANSPORT=mailtrap` selects the Mailtrap Sending API instead of SMTP.
+ * That transport needs an `HttpClientPort`, which is resolved OPTIONALLY here:
+ * this module declares no `requires[]`, so an SMTP-only application is not
+ * forced to install the HttpClient plugin, and the absence is reported — with
+ * the fix — when a mailtrap transport is actually built.
  *
  * Also publishes `MailerFactoryContract`: the seam a project uses to build a
  * mailer for SMTP settings this module's own config knows nothing about (a
@@ -52,25 +60,34 @@ final class Provider implements ModuleContract
     /** @return list<class-string> */
     public function exposes(): array
     {
-        return [MailPort::class, MailerContract::class, MailerFactoryContract::class];
+        return [MailPort::class, MailerContract::class, MailerFactoryContract::class, MailtrapApiContract::class];
     }
 
     public function register(ModuleContainer $container): void
     {
-        $config     = $this->config();
-        $transports = new TransportFactory();
+        $config = $this->config();
 
-        $container->bindInternal(TransportFactory::class, static fn(): TransportFactory => $transports);
+        // The factory is built LAZILY, not eagerly as a captured local, because
+        // it now needs the HttpClientPort for the mailtrap transport. Module
+        // register() order is the dependency graph's, and this module declares
+        // no requires[] -- so at register() time the HttpClient plugin may not
+        // have bound its port yet. Resolving inside the closure defers the
+        // lookup to first use, by which point every module in the graph has
+        // registered. Optional on purpose: an application sending over SMTP
+        // must not be made to install a plugin it has no use for.
+        $container->bindInternal(TransportFactory::class, static fn(ModuleContainer $c): TransportFactory =>
+            new TransportFactory($c->has(HttpClientPort::class) ? $c->make(HttpClientPort::class) : null));
 
-        $container->bindInternal(Transport::class, static fn(): Transport => $transports->fromConfig($config));
+        $container->bindInternal(Transport::class, static fn(ModuleContainer $c): Transport =>
+            $c->make(TransportFactory::class)->fromConfig($config));
 
         $container->bindInternal(MimeBuilder::class, static fn(): MimeBuilder => new MimeBuilder());
 
-        $container->bind(Mailer::class, function (ModuleContainer $c) use ($config, $transports): Mailer {
+        $container->bind(Mailer::class, function (ModuleContainer $c) use ($config): Mailer {
             return new Mailer(
                 transport: $c->make(Transport::class),
                 mime:      $c->make(MimeBuilder::class),
-                dkim:      $transports->dkim($config),
+                dkim:      $c->make(TransportFactory::class)->dkim($config),
                 views:     $c->has(ViewRendererContract::class) ? $c->make(ViewRendererContract::class) : null,
                 queue:     $c->has(QueuePort::class) ? $c->make(QueuePort::class) : null,
                 fromEmail: (string) ($config['from']['address'] ?? ''),
@@ -94,13 +111,26 @@ final class Provider implements ModuleContract
         // config knows nothing about (a tenant's own server, most commonly) —
         // without a project reaching into Transport/SmtpTransport/MimeBuilder,
         // which stay bindInternal. Delivery is always inline (see MailerFactory).
-        $container->bind(MailerFactoryContract::class, function (ModuleContainer $c) use ($config, $transports): MailerFactoryContract {
+        $container->bind(MailerFactoryContract::class, function (ModuleContainer $c) use ($config): MailerFactoryContract {
             return new MailerFactory(
-                transports: $transports,
+                transports: $c->make(TransportFactory::class),
                 config:     $config,
                 views:      $c->has(ViewRendererContract::class) ? $c->make(ViewRendererContract::class) : null,
             );
         });
+
+        // The Mailtrap MANAGEMENT API (domains, suppressions, logs, campaigns,
+        // sandbox, inbound). Independent of MAIL_TRANSPORT on purpose: an
+        // application can deliver over SMTP and still read its own bounce log,
+        // so this is bound whenever a token is configured rather than only when
+        // the mailtrap transport is selected.
+        //
+        // Resolving it without an HttpClientPort, or without MAILTRAP_API_TOKEN,
+        // throws with the fix in the message -- binding a null object instead
+        // would turn a misconfiguration into an API that silently answers
+        // nothing.
+        $container->bind(MailtrapApiContract::class, static fn(ModuleContainer $c): MailtrapApiContract =>
+            $c->make(TransportFactory::class)->mailtrapApiFromArray((array) ($config['mailtrap'] ?? [])));
 
         // Background delivery job resolves the same Transport. The logger is
         // optional and resolved the same way the Mailer's are -- a dead-lettered

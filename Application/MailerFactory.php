@@ -6,6 +6,8 @@ namespace Plugins\Mail\Application;
 
 use Plugins\Mail\API\Contracts\MailerContract;
 use Plugins\Mail\API\Contracts\MailerFactoryContract;
+use Plugins\Mail\API\Contracts\MailtrapApiContract;
+use Plugins\Mail\API\DTOs\MailtrapSettings;
 use Plugins\Mail\API\DTOs\SmtpSettings;
 use Plugins\Mail\Infrastructure\Mime\MimeBuilder;
 use Plugins\Mail\Infrastructure\Transport\TransportFactory;
@@ -39,22 +41,49 @@ final class MailerFactory implements MailerFactoryContract
 
     public function forSmtp(SmtpSettings $settings): MailerContract
     {
-        $fromEmail = $settings->fromEmail !== ''
-            ? $settings->fromEmail
-            : (string) ($this->config['from']['address'] ?? '');
-        $fromName = $settings->fromName !== ''
-            ? $settings->fromName
-            : (string) ($this->config['from']['name'] ?? '');
-
         return new Mailer(
             transport: $this->transports->smtpFromSettings($settings, (array) ($this->config['smtp'] ?? [])),
             mime:      new MimeBuilder(),
             dkim:      $this->transports->dkim($this->config),
             views:     $this->views,
             queue:     null,
-            fromEmail: $fromEmail,
-            fromName:  $fromName,
+            fromEmail: $this->fromEmail($settings->fromEmail),
+            fromName:  $this->fromName($settings->fromName),
             charset:   (string) ($this->config['charset'] ?? 'UTF-8'),
         );
+    }
+
+    public function forMailtrap(MailtrapSettings $settings): MailerContract
+    {
+        return new Mailer(
+            transport: $this->transports->mailtrapFromSettings($settings),
+            mime:      new MimeBuilder(),
+            // No DKIM on the API path: Mailtrap builds the MIME and signs with
+            // the keys registered for the sending domain, so a locally computed
+            // signature has nothing to sign over. Passing the configured signer
+            // here would look like it was doing something.
+            dkim:      null,
+            views:     $this->views,
+            queue:     null,
+            fromEmail: $this->fromEmail($settings->fromEmail),
+            fromName:  $this->fromName($settings->fromName),
+            charset:   (string) ($this->config['charset'] ?? 'UTF-8'),
+        );
+    }
+
+    public function forMailtrapApi(MailtrapSettings $settings): MailtrapApiContract
+    {
+        return $this->transports->mailtrapApiFromSettings($settings);
+    }
+
+    /** The caller's default From, else this plugin's configured one. */
+    private function fromEmail(string $supplied): string
+    {
+        return $supplied !== '' ? $supplied : (string) ($this->config['from']['address'] ?? '');
+    }
+
+    private function fromName(string $supplied): string
+    {
+        return $supplied !== '' ? $supplied : (string) ($this->config['from']['name'] ?? '');
     }
 }

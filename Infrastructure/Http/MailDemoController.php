@@ -24,7 +24,7 @@ use Project\Http\Controllers\ApiController;
  *   GET /mail/demo/view     → MailPort::send()            — kernel view-based shortcut
  *
  * Safety: the routes that actually transmit (send/queue/view) refuse to run unless a
- * non-sending transport (MAIL_TRANSPORT=array|log) is active OR APP_DEBUG=true — so
+ * non-sending transport (MAIL_TRANSPORT=array|log) is active OR MAIL_DEMO_ALLOW_SEND=true — so
  * an accidentally-enabled demo can't become an open relay. `preview` never sends and
  * is always available.
  *
@@ -56,7 +56,7 @@ final class MailDemoController extends ApiController
             ],
             'tips'            => [
                 'Test without a real SMTP server: set MAIL_TRANSPORT=array or MAIL_TRANSPORT=log.',
-                'send/queue/view return 403 unless a non-sending transport is active or APP_DEBUG=true.',
+                'send/queue/view return 403 unless a non-sending transport is active or MAIL_DEMO_ALLOW_SEND=true.',
                 'GET /mail/demo/preview is the fastest way to SEE what the MIME builder produces.',
             ],
         ]);
@@ -148,7 +148,6 @@ final class MailDemoController extends ApiController
         try {
             $this->mail->send($to, 'MailPort demo', $html, ['now' => date('r')]);
         } catch (MailException $e) {
-            dd($e);
             return $this->unprocessable(['to' => $e->getMessage()]);
         }
 
@@ -208,18 +207,34 @@ final class MailDemoController extends ApiController
     }
 
     /**
-     * Block real transmission unless it is demonstrably safe: a non-sending transport
-     * (array/log) or an explicit APP_DEBUG=true. Returns a 403 Response when blocked,
-     * or null when the caller may proceed.
+     * Block real transmission unless it is demonstrably safe: a non-sending
+     * transport (array/log), or a deliberate `MAIL_DEMO_ALLOW_SEND=true`.
+     * Returns a 403 Response when blocked, or null when the caller may proceed.
+     *
+     * WHY NOT APP_DEBUG, which this used to accept. These routes are `GET`,
+     * carry no auth filter, and take the recipient from the query string, so
+     * whatever gates them is the only thing between a published URL and mail
+     * leaving the account's verified domain — passing SPF and DKIM, because it
+     * genuinely is the account. `APP_DEBUG` is the wrong gate for that: it is
+     * about showing stack traces, it gets switched on in production to
+     * diagnose an incident, and nobody flipping it is thinking about mail.
+     *
+     * A variable that means only this cannot be enabled by accident, and
+     * reading its name in a diff tells you exactly what it permits. It is
+     * declared in `module.json` `config[]` WITHOUT a default, so `hkm plugins
+     * enable mail` seeds it commented out and an untouched deployment has no
+     * opinion to get wrong.
      */
     private function guard(): ?Response
     {
         $safe = in_array($this->transport(), ['array', 'log'], true)
-            || filter_var(env('APP_DEBUG', false), FILTER_VALIDATE_BOOL);
+            || filter_var(env('MAIL_DEMO_ALLOW_SEND', false), FILTER_VALIDATE_BOOL);
 
         return $safe ? null : $this->forbidden(
             'Live mail sending is disabled for the demo routes. Set MAIL_TRANSPORT=array|log to test '
-            . 'safely, or APP_DEBUG=true to allow real delivery.',
+            . 'safely, or MAIL_DEMO_ALLOW_SEND=true to allow real delivery from these routes. '
+            . 'Neither belongs in production: remove the /mail/demo/* routes from the deployment '
+            . '(proj.json → routePolicy.disable).',
         );
     }
 }

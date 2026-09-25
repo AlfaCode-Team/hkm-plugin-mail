@@ -7,11 +7,15 @@ namespace Tests\Unit\Plugins\Mail;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 use Plugins\Mail\API\Contracts\MailerContract;
+use Plugins\Mail\API\DTOs\MailtrapSettings;
+use Plugins\Mail\API\DTOs\MailtrapStream;
 use Plugins\Mail\API\DTOs\SmtpSettings;
 use Plugins\Mail\Application\Mailer;
 use Plugins\Mail\Application\MailerFactory;
 use Plugins\Mail\Infrastructure\Security\DkimSigner;
+use Plugins\Mail\Domain\MailException;
 use Plugins\Mail\Infrastructure\Transport\ArrayTransport;
+use Plugins\Mail\Infrastructure\Transport\MessageTransport;
 use Plugins\Mail\Infrastructure\Transport\Transport;
 use Plugins\Mail\Infrastructure\Transport\TransportFactory;
 
@@ -123,6 +127,111 @@ final class MailerFactoryTest extends TestCase
         self::assertStringContainsString('DKIM-Signature:', $transport->last()['mime']);
     }
 
+    // ── forMailtrap ──────────────────────────────────────────────────────────
+
+    public function test_for_mailtrap_builds_a_mailer_on_the_api_transport(): void
+    {
+        $transport = new \Tests\Unit\Plugins\Mail\Fakes\RecordingMessageTransport();
+        $factory   = new MailerFactory(new StubMailtrapTransportFactory($transport), []);
+
+        $mailer = $factory->forMailtrap($this->mailtrapSettings());
+        $mailer->dispatch($mailer->message()->to('customer@example.test')->subject('Hi')->text('Hello'));
+
+        self::assertInstanceOf(MailerContract::class, $mailer);
+        self::assertCount(1, $transport->messages);
+    }
+
+    public function test_for_mailtrap_prefers_the_settings_from_then_the_configured_one(): void
+    {
+        $transport = new \Tests\Unit\Plugins\Mail\Fakes\RecordingMessageTransport();
+        $factory   = new MailerFactory(
+            new StubMailtrapTransportFactory($transport),
+            ['from' => ['address' => 'platform@example.test', 'name' => 'Platform']],
+        );
+
+        self::assertSame(
+            'billing@tenant.test',
+            $factory->forMailtrap($this->mailtrapSettings('billing@tenant.test'))->message()->getFrom()->email,
+        );
+        self::assertSame(
+            'platform@example.test',
+            $factory->forMailtrap($this->mailtrapSettings(''))->message()->getFrom()->email,
+        );
+    }
+
+    public function test_for_mailtrap_never_signs_with_the_configured_dkim_key(): void
+    {
+        [$domain, $selector, $key] = $this->dkimFixture();
+        $transport = new \Tests\Unit\Plugins\Mail\Fakes\RecordingMessageTransport();
+        $factory   = new MailerFactory(
+            new StubMailtrapTransportFactory($transport),
+            ['dkim' => ['domain' => $domain, 'selector' => $selector, 'private_key' => $key]],
+        );
+
+        $mailer  = $factory->forMailtrap($this->mailtrapSettings());
+        $message = $mailer->message()->to('customer@example.test')->subject('Hi')->text('Hello');
+        $mailer->dispatch($message);
+
+        // Mailtrap builds the MIME and signs it with the sending domain's keys;
+        // preview() is the only MIME this mailer ever produces and it must not
+        // claim a signature that is never sent.
+        self::assertStringNotContainsString('DKIM-Signature:', $mailer->preview($message));
+    }
+
+    public function test_a_mailtrap_transport_with_no_http_client_bound_says_how_to_get_one(): void
+    {
+        $this->expectException(MailException::class);
+        $this->expectExceptionMessage('http.client');
+
+        (new TransportFactory())->mailtrapFromSettings($this->mailtrapSettings());
+    }
+
+    public function test_the_configured_transport_name_selects_the_mailtrap_api(): void
+    {
+        $this->expectException(MailException::class);
+        $this->expectExceptionMessage('HttpClientPort');
+
+        (new TransportFactory())->fromConfig([
+            'transport' => 'mailtrap',
+            'mailtrap'  => ['token' => 'tok', 'stream' => 'transactional'],
+        ]);
+    }
+
+    // ── transport selection ──────────────────────────────────────────────────
+
+    /**
+     * An unrecognised MAIL_TRANSPORT used to fall through to SMTP. That is the
+     * worst available outcome for a typo: the mailer builds fine, points at
+     * whatever MAIL_HOST defaulted to, and the mistake surfaces — if at all —
+     * as a connection error naming a host nobody configured.
+     */
+    public function test_an_unknown_transport_name_is_refused_rather_than_falling_back_to_smtp(): void
+    {
+        $this->expectException(MailException::class);
+        $this->expectExceptionMessage("Unknown MAIL_TRANSPORT 'mailtrp'");
+
+        (new TransportFactory())->fromConfig(['transport' => 'mailtrp']);
+    }
+
+    public function test_an_absent_or_blank_transport_still_means_smtp(): void
+    {
+        $factory = new TransportFactory();
+
+        // The documented default — changing this would break every deployment
+        // that never set the variable.
+        self::assertInstanceOf(Transport::class, $factory->fromConfig([]));
+        self::assertInstanceOf(Transport::class, $factory->fromConfig(['transport' => '']));
+        self::assertInstanceOf(Transport::class, $factory->fromConfig(['transport' => '  SMTP  ']));
+    }
+
+    public function test_the_non_sending_transports_are_selectable_by_name(): void
+    {
+        $factory = new TransportFactory();
+
+        self::assertInstanceOf(ArrayTransport::class, $factory->fromConfig(['transport' => 'array']));
+        self::assertInstanceOf(Transport::class, $factory->fromConfig(['transport' => 'log']));
+    }
+
     // ── fixtures ─────────────────────────────────────────────────────────────
 
     /** @param array<string,mixed> $config */
@@ -143,6 +252,11 @@ final class MailerFactoryTest extends TestCase
         );
     }
 
+    private function mailtrapSettings(string $fromEmail = 'billing@tenant.test'): MailtrapSettings
+    {
+        return new MailtrapSettings('tenant-token', MailtrapStream::Transactional, fromEmail: $fromEmail);
+    }
+
     /** @return array{0: string, 1: string, 2: string} domain, selector, PEM key */
     private function dkimFixture(): array
     {
@@ -161,6 +275,19 @@ final class StubTransportFactory extends TransportFactory
     }
 
     public function smtpFromSettings(SmtpSettings $settings, array $smtpConfig): Transport
+    {
+        return $this->transport;
+    }
+}
+
+/** Hands back a fake MESSAGE transport instead of dialling the Mailtrap API. */
+final class StubMailtrapTransportFactory extends TransportFactory
+{
+    public function __construct(private readonly MessageTransport $transport)
+    {
+    }
+
+    public function mailtrapFromSettings(MailtrapSettings $settings): MessageTransport
     {
         return $this->transport;
     }

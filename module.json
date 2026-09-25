@@ -1,6 +1,6 @@
 {
     "name": "mail",
-    "version": "1.3.0",
+    "version": "1.5.0",
     "kernel": "^1.13.1",
     "solves": "mail.delivery",
     "type": "module",
@@ -9,7 +9,8 @@
     "exposes": [
         "AlfacodeTeam\\PhpServicePlatform\\Kernel\\Ports\\MailPort",
         "Plugins\\Mail\\API\\Contracts\\MailerContract",
-        "Plugins\\Mail\\API\\Contracts\\MailerFactoryContract"
+        "Plugins\\Mail\\API\\Contracts\\MailerFactoryContract",
+        "Plugins\\Mail\\API\\Contracts\\MailtrapApiContract"
     ],
 
     "routePrefix": "/mail/demo",
@@ -27,7 +28,7 @@
         { "name": "mail.send", "handler": "Plugins\\Mail\\Application\\Jobs\\SendMailJob", "queue": "mail" }
     ],
 
-    "documentation": "The Mail plugin — a native, dependency-free MailPort adapter + rich MailerContract. Transports: SMTP (TLS/STARTTLS, AUTH PLAIN/LOGIN/CRAM-MD5/XOAUTH2, multi-host failover, keep-alive), Sendmail, PHP mail(), Array/Log (test/dev). Message API: from/sender/return-path, to/cc/bcc, reply-to, HTML + auto plain-text alternative, file/raw/inline-CID attachments, custom headers, priority, read receipts, charset. Security: CR/LF header-injection guards on every address/header/param, TLS peer verification, DKIM RSA-SHA256 signing (relaxed/relaxed), hidden BCC. send()/queue() (queue via QueuePort + the mail.send job); views render through ViewRendererContract when present, else the view string is treated as raw HTML. Config in config/mail.php (MAIL_* env).",
+    "documentation": "The Mail plugin — a native, dependency-free MailPort adapter, a rich MailerContract, and a complete port of the Mailtrap API. Transports: SMTP (TLS/STARTTLS, AUTH PLAIN/LOGIN/CRAM-MD5/XOAUTH2, multi-host failover, keep-alive), Mailtrap Sending API (transactional/bulk/sandbox streams, stored templates, category, custom variables, batch send, per-message ids), Sendmail, PHP mail(), Array/Log (test/dev). Message API: from/sender/return-path, to/cc/bcc, reply-to, HTML + auto plain-text alternative, file/raw/inline-CID attachments, custom headers, priority, read receipts, charset, and the provider fields category/customVariables/template. MailtrapApiContract publishes the whole management API — accounts, API tokens, billing, permissions, users, sub-accounts, organizations, contacts/lists/fields/imports/events/exports, campaigns, email templates, sending domains, company info, email logs, stats, suppressions, tracking opt-outs, webhooks, sandbox projects/inboxes/messages/attachments, and inbound folders/inboxes/threads/messages incl. reply/replyAll/forward. Security: CR/LF header-injection guards on every address/header/param, TLS peer verification, DKIM RSA-SHA256 signing (relaxed/relaxed) on the MIME transports, hidden BCC, API tokens redacted from every debug and trace surface, and MailtrapWebhookSignature for verifying inbound delivery webhooks. send()/queue()/dispatchBatch() (queue via QueuePort + the mail.send job, which carries either built MIME or the serialised Message depending on the transport); views render through ViewRendererContract when present, else the view string is treated as raw HTML. MAIL_TRANSPORT=mailtrap and MailtrapApiContract both need an HttpClientPort in the request's dependency graph — this module declares no requires[], so install the HttpClient plugin and reach it via the consuming module's requires[], proj.json \"essentials\", or a withPorts() binding. Config in config/mail.php (MAIL_* / MAILTRAP_* env).",
 
     "config": [
         { "key": "MAIL_TRANSPORT",      "type": "string", "required": false },
@@ -47,6 +48,14 @@
         { "key": "MAIL_KEEP_ALIVE",     "type": "bool",   "required": false },
         { "key": "MAIL_ALLOW_INSECURE_AUTH", "type": "bool", "required": false },
         { "key": "MAIL_SENDMAIL_BINARY","type": "string", "required": false },
+
+        { "key": "MAILTRAP_API_TOKEN",  "type": "string", "required": false },
+        { "key": "MAILTRAP_STREAM",     "type": "string", "required": false, "default": "transactional" },
+        { "key": "MAILTRAP_INBOX_ID",   "type": "int",    "required": false },
+        { "key": "MAILTRAP_HOST",       "type": "string", "required": false },
+        { "key": "MAILTRAP_TIMEOUT",    "type": "int",    "required": false, "default": 30 },
+        { "key": "MAILTRAP_WEBHOOK_SECRET", "type": "string", "required": false },
+
         { "key": "MAIL_DKIM_DOMAIN",    "type": "string", "required": false },
         { "key": "MAIL_DKIM_SELECTOR",  "type": "string", "required": false },
         { "key": "MAIL_DKIM_KEY",       "type": "string", "required": false },
@@ -54,6 +63,7 @@
         { "key": "MAIL_QUEUE",          "type": "string", "required": false },
         { "key": "MAIL_URGENT_VIEWS",      "type": "string", "required": false },
         { "key": "MAIL_URGENT_MAX_INLINE", "type": "int",    "required": false },
-        { "key": "MAIL_URGENT_LOCK_TTL",   "type": "int",    "required": false }
+        { "key": "MAIL_URGENT_LOCK_TTL",   "type": "int",    "required": false },
+        { "key": "MAIL_DEMO_ALLOW_SEND",   "type": "bool",   "required": false }
     ]
 }

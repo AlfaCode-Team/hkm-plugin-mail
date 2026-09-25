@@ -21,8 +21,12 @@ final readonly class Attachment
         public ?string $path,       // read at build time when set
         public ?string $data,       // raw bytes when path is null
     ) {
-        if (preg_match('/[\r\n\x00]/', $name) === 1 || preg_match('/[\r\n\x00]/', $cid) === 1) {
-            throw new MailException('Attachment name/cid may not contain control characters.');
+        // The mime type is concatenated into the part's `Content-Type:` header
+        // exactly as name and cid are into theirs, so it needs the same guard.
+        // It was the one field of the three without one, and fromArray() now
+        // lets a queue payload reach it.
+        if (preg_match('/[\r\n\x00]/', $name . $cid . $mimeType) === 1) {
+            throw new MailException('Attachment name/cid/mime-type may not contain control characters.');
         }
     }
 
@@ -70,6 +74,52 @@ final readonly class Attachment
             throw new MailException("Failed to read attachment: {$this->path}");
         }
         return $bytes;
+    }
+
+    /**
+     * A JSON-safe snapshot, with the bytes RESOLVED.
+     *
+     * A path-backed attachment is read here rather than carried as a path,
+     * because this exists to cross a queue: by the time a worker picks the job
+     * up the temp upload has usually been cleaned away, and a path that still
+     * resolves in the worker may not be the same file any more. Reading once,
+     * at enqueue time, is also what the MIME path does — {@see \Plugins\Mail\Infrastructure\Mime\MimeBuilder}
+     * builds the base64 part before the message is queued.
+     *
+     * @return array{name: string, mime_type: string, inline: bool, cid: string, data: string}
+     */
+    public function toArray(): array
+    {
+        return [
+            'name'      => $this->name,
+            'mime_type' => $this->mimeType,
+            'inline'    => $this->inline,
+            'cid'       => $this->cid,
+            'data'      => base64_encode($this->contents()),
+        ];
+    }
+
+    /**
+     * Rebuild from {@see self::toArray()} — always data-backed, never a path.
+     *
+     * @param array<string,mixed> $data
+     */
+    public static function fromArray(array $data): self
+    {
+        $bytes = base64_decode((string) ($data['data'] ?? ''), true);
+
+        if ($bytes === false) {
+            throw new MailException('Attachment payload is not valid base64.');
+        }
+
+        return new self(
+            name:     (string) ($data['name'] ?? ''),
+            mimeType: (string) ($data['mime_type'] ?? 'application/octet-stream'),
+            inline:   (bool) ($data['inline'] ?? false),
+            cid:      (string) ($data['cid'] ?? ''),
+            path:     null,
+            data:     $bytes,
+        );
     }
 
     private static function guessMime(string $path): string

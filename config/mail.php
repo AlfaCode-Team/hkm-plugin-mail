@@ -7,7 +7,7 @@ declare(strict_types=1);
  * and DKIM signer. All values fall back to env() so nothing is hard-coded.
  */
 return [
-    // smtp | sendmail | mail | array | log
+    // smtp | sendmail | mail | mailtrap | array | log
     'transport' => env('MAIL_TRANSPORT', 'smtp'),
 
     'from' => [
@@ -77,6 +77,48 @@ return [
 
     'sendmail' => [
         'binary' => env('MAIL_SENDMAIL_BINARY', '/usr/sbin/sendmail'),
+    ],
+
+    /**
+     * MAILTRAP SENDING API — used when MAIL_TRANSPORT=mailtrap.
+     *
+     * Delivery over HTTPS instead of SMTP. What that buys over pointing the
+     * SMTP transport at Mailtrap's own server: templates stored at Mailtrap
+     * (Message::template()), a category and custom variables that come back on
+     * the delivery webhooks, batch sending in one request, and a per-message id
+     * in the response you can actually correlate a bounce with.
+     *
+     * What it costs: an HttpClientPort has to be in the request's dependency
+     * graph (this plugin declares no requires[], so install the HttpClient
+     * plugin and reach it via the consuming module's requires[], proj.json
+     * "essentials", or a withPorts() binding), and DKIM is Mailtrap's rather
+     * than yours -- it builds the MIME, so MAIL_DKIM_* does not apply.
+     *
+     * The STREAM is the host, not a flag in the payload:
+     *   transactional  one-to-one mail a person triggered  (the default)
+     *   bulk           one-to-many mail: campaigns, digests
+     *   sandbox        captured in an inbox and NEVER delivered -- needs
+     *                  MAILTRAP_INBOX_ID, which goes in the URL path
+     */
+    'mailtrap' => [
+        'token'    => env('MAILTRAP_API_TOKEN', ''),
+        'stream'   => env('MAILTRAP_STREAM', 'transactional'),
+        'inbox_id' => (int) env('MAILTRAP_INBOX_ID', 0),
+        // Point at a proxy or a mock; empty = the stream's own host.
+        'host'     => env('MAILTRAP_HOST', ''),
+        'timeout'  => (int) env('MAILTRAP_TIMEOUT', 30),
+
+        /**
+         * Signing secret for INBOUND Mailtrap webhooks, returned when a webhook
+         * is created (MailtrapApiContract::webhooks()->createWebhook()).
+         *
+         * Declared here so the documented verification example works without a
+         * project inventing its own key name. A webhook endpoint is an
+         * unauthenticated public POST: anything acting on one without
+         * MailtrapWebhookSignature::verify() is acting on input from whoever
+         * found the URL.
+         */
+        'webhook_secret' => env('MAILTRAP_WEBHOOK_SECRET', ''),
     ],
 
     // DKIM signing — leave domain/selector/key empty to disable.
